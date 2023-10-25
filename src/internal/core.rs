@@ -65,9 +65,17 @@ impl<P: Package, VS: VersionSet> State<P, VS> {
     }
 
     /// Add an incompatibility to the state.
-    pub fn add_incompatibility(&mut self, incompat: Incompatibility<P, VS>) {
+    pub fn add_incompatibility(
+        &mut self,
+        incompat: Incompatibility<P, VS>,
+    ) -> Result<(), PubGrubError<P, VS>> {
+        let is_terminal = incompat.is_terminal(&self.root_package, &self.root_version);
         let id = self.incompatibility_store.alloc(incompat);
+        if is_terminal {
+            return Err(PubGrubError::NoSolution(self.build_derivation_tree(id)));
+        }
         self.merge_incompatibility(id);
+        Ok(())
     }
 
     /// Add an incompatibility to the state.
@@ -161,40 +169,40 @@ impl<P: Package, VS: VersionSet> State<P, VS> {
         let mut current_incompat_id = incompatibility;
         let mut current_incompat_changed = false;
         loop {
-            if self.incompatibility_store[current_incompat_id]
-                .is_terminal(&self.root_package, &self.root_version)
-            {
-                return Err(PubGrubError::NoSolution(
-                    self.build_derivation_tree(current_incompat_id),
-                ));
-            } else {
-                let (package, satisfier_search_result) = self.partial_solution.satisfier_search(
-                    &self.incompatibility_store[current_incompat_id],
-                    &self.incompatibility_store,
-                );
-                match satisfier_search_result {
-                    DifferentDecisionLevels {
+            let (package, satisfier_search_result) = self.partial_solution.satisfier_search(
+                &self.incompatibility_store[current_incompat_id],
+                &self.incompatibility_store,
+            );
+            match satisfier_search_result {
+                DifferentDecisionLevels {
+                    previous_satisfier_level,
+                } => {
+                    self.backtrack(
+                        current_incompat_id,
+                        current_incompat_changed,
                         previous_satisfier_level,
-                    } => {
-                        self.backtrack(
-                            current_incompat_id,
-                            current_incompat_changed,
-                            previous_satisfier_level,
-                        );
-                        log::info!("backtrack to {:?}", previous_satisfier_level);
-                        return Ok((package, current_incompat_id));
+                    );
+                    log::info!("backtrack to {:?}", previous_satisfier_level);
+                    return Ok((package, current_incompat_id));
+                }
+                SameDecisionLevels { satisfier_cause } => {
+                    let prior_cause = Incompatibility::prior_cause(
+                        current_incompat_id,
+                        satisfier_cause,
+                        &package,
+                        &self.incompatibility_store,
+                    );
+                    log::info!("prior cause: {}", prior_cause);
+                    let is_terminal =
+                        prior_cause.is_terminal(&self.root_package, &self.root_version);
+                    current_incompat_id = self.incompatibility_store.alloc(prior_cause);
+
+                    if is_terminal {
+                        return Err(PubGrubError::NoSolution(
+                            self.build_derivation_tree(current_incompat_id),
+                        ));
                     }
-                    SameDecisionLevels { satisfier_cause } => {
-                        let prior_cause = Incompatibility::prior_cause(
-                            current_incompat_id,
-                            satisfier_cause,
-                            &package,
-                            &self.incompatibility_store,
-                        );
-                        log::info!("prior cause: {}", prior_cause);
-                        current_incompat_id = self.incompatibility_store.alloc(prior_cause);
-                        current_incompat_changed = true;
-                    }
+                    current_incompat_changed = true;
                 }
             }
         }
